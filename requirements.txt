@@ -1,0 +1,15 @@
+# CPU Capacity Management — Python dependencies
+
+# Core ML / forecasting
+# statsforecast provides AutoARIMA, AutoETS, MSTL — no Stan/C++ compiler needed
+statsforecast>=1.7.0
+
+# Data manipulation
+pandas>=2.1.0
+numpy>=1.26.0
+
+# Elasticsearch
+elasticsearch>=8.10.0
+
+# Visualization
+matplotlib>=3.8.0

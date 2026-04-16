@@ -1,8 +1,10 @@
-# CPU Capacity Management — Python dependencies
+# Capacity Management — Python dependencies
 
 # Core ML / forecasting
-# statsforecast provides AutoARIMA, AutoETS, MSTL — no Stan/C++ compiler needed
-statsforecast>=1.7.0
+# pmdarima  : pure-Python Auto-ARIMA (wraps statsmodels) — no compiler needed on Windows
+# statsmodels: STL seasonal decomposition + ExponentialSmoothing ensemble
+pmdarima>=2.0.4
+statsmodels>=0.14.0
 
 # Data manipulation
 pandas>=2.1.0

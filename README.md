@@ -76,7 +76,7 @@ Two independent pipelines share the same codebase, configuration, and Elasticsea
                4. Convert wide → long (unique_id, ds, y)
                                   │
                                   ▼
-               MODEL TRAINING  (StatsForecast — parallel fit)
+               MODEL TRAINING  (statsmodels STL + pmdarima AutoARIMA)
                ┌────────────────────────────────────────────┐
                │  MSTL  season_length=[24, 168]             │
                │    ├── STL(24)  → daily seasonal component  │
@@ -117,49 +117,59 @@ Two independent pipelines share the same codebase, configuration, and Elasticsea
 
 ## ML Algorithm
 
-**MSTL + AutoARIMA** (from [Nixtla statsforecast](https://github.com/Nixtla/statsforecast))
+**Multi-STL + AutoARIMA + ETS ensemble**
+
+Libraries: **`statsmodels`** + **`pmdarima`** — pure Python, install on any OS including Windows with no C++ compiler or native toolchain.
 
 ### Why this combination for capacity management
 
 | Requirement | How it is met |
 |---|---|
-| Daily cycle (business hours peak) | MSTL `season_length=24` strips the 24h seasonal component |
-| Weekly cycle (weekday vs weekend) | MSTL `season_length=168` strips the 7×24h seasonal component |
-| Long-term capacity growth / memory-leak trend | AutoARIMA models the de-seasonalized trend |
-| Confidence intervals for alerting | 95% prediction interval from MSTL+AutoARIMA residual variance |
-| No compiler toolchain required | Pure Python/C — no Stan, no MinGW, no RTools |
-| Multiple correlated metrics | StatsForecast fits all metrics in parallel (`n_jobs=-1`) |
-| Automatic hyperparameter selection | AutoARIMA AICc stepwise search — no manual p,d,q tuning |
+| Daily cycle (business hours peak) | `statsmodels.STL(period=24)` strips the 24 h seasonal component |
+| Weekly cycle (weekday vs weekend) | `statsmodels.STL(period=168)` strips the 7×24 h seasonal component |
+| Long-term capacity growth / memory-leak trend | `pmdarima.auto_arima` models the de-seasonalised remainder |
+| Confidence intervals for alerting | 95% prediction interval from AutoARIMA residual variance |
+| Works on Windows without a compiler | Pure Python — no Stan, no MinGW, no RTools, no C++ |
+| Automatic hyperparameter selection | AICc stepwise search — no manual p, d, q tuning |
+| Shared engine across CPU and memory | `BaseCapacityPredictor` in `base_predictor.py` |
 
-### Why not Prophet?
+### Why not Prophet or statsforecast?
 
-Prophet requires CmdStan (a C++ compiler toolchain). On Windows this means installing MinGW or Rtools, which is error-prone in CI/CD and containerised environments. MSTL+AutoARIMA achieves equal or better accuracy with zero native dependencies.
+| Library | Reason not used |
+|---|---|
+| **Prophet** | Requires CmdStan (C++ compiler). Fails on locked-down Windows machines without MinGW/RTools. |
+| **statsforecast** | Binary wheels not always available for all Windows Python versions; optional C extension can fail to compile. |
+| **statsmodels + pmdarima** | ✅ Pure Python wheels, no native extension, installs via `pip` on any Windows environment. |
 
-### How MSTL decomposition works
+### How the Multi-STL decomposition works
 
 ```
 Original hourly series (CPU or Memory)
     │
-    ├── STL decomposition (period=24)
-    │     ├── Seasonal₂₄   (daily pattern — e.g. peak at 14:00)
-    │     └── Trend₂₄ + Remainder
+    ├── STL(period=24)  — statsmodels
+    │     ├── Seasonal₂₄    daily pattern  (e.g. CPU peak at 14:00)
+    │     └── Trend + Residual₂₄
     │               │
-    │               └── STL decomposition (period=168)
-    │                     ├── Seasonal₁₆₈  (weekly pattern — weekdays vs weekend)
-    │                     └── Trend + Residual
+    │               └── STL(period=168)  — statsmodels
+    │                     ├── Seasonal₁₆₈   weekly pattern (weekdays vs weekend)
+    │                     └── Trend + Residual₁₆₈
     │                               │
-    │                               └── AutoARIMA fits this residual
+    │                               └── auto_arima  — pmdarima
+    │                                   AICc stepwise, max_p=5, max_q=5
     │
-    Forecast = AutoARIMA_forecast + Seasonal₂₄ + Seasonal₁₆₈
+    Forecast = ARIMA_forecast + Seasonal₂₄ (last cycle repeated)
+                              + Seasonal₁₆₈ (last cycle repeated)
 ```
 
 ### Ensemble
 
 ```
-Final yhat = (MSTL+AutoARIMA  +  AutoETS) / 2
+Final yhat = (STL+AutoARIMA  +  ExponentialSmoothing) / 2
 ```
 
-AutoETS (Exponential Smoothing) adds robustness: it weights recent observations more heavily, which helps when there are sudden shifts (e.g. a new deployment, a memory-intensive batch job) that the ARIMA trend has not yet adapted to.
+`ExponentialSmoothing` (`statsmodels`, trend=add, seasonal=add, period=24) weights recent observations more heavily, which helps when there are sudden load shifts — a new deployment, a memory-intensive batch job — that the ARIMA trend model has not yet adapted to.
+
+Confidence intervals come from the AutoARIMA model; the CI half-width is re-centred on the ensemble mean.
 
 ---
 
@@ -169,19 +179,21 @@ AutoETS (Exponential Smoothing) adds robustness: it weights recent observations 
 .
 ├── config.py                   # All thresholds, ES config, model hyperparameters (CPU + Memory)
 │
+├── base_predictor.py           # ★ Shared forecasting engine: Multi-STL + AutoARIMA + ETS
+│
 ├── data_generator.py           # Synthetic CPU data (15 months, 5-min, daily+weekly seasonality)
-├── predictor.py                # CPUPredictor — MSTL+AutoARIMA training and forecasting
+├── predictor.py                # CPUPredictor — extends BaseCapacityPredictor for CPU metrics
 ├── alert_manager.py            # CPUAlert objects; threshold evaluation
 │
 ├── memory_data_generator.py    # Synthetic memory data (same period, same frequency)
-├── memory_predictor.py         # MemoryPredictor — MSTL+AutoARIMA for memory metrics
+├── memory_predictor.py         # MemoryPredictor — extends BaseCapacityPredictor for memory
 ├── memory_alert_manager.py     # MemoryAlert objects; threshold evaluation
 │
 ├── elasticsearch_client.py     # Bulk indexing — all 6 indices (CPU + Memory)
 ├── visualizer.py               # Forecast PNG plots for CPU and Memory (matplotlib)
 ├── main.py                     # CLI pipeline — --mode cpu | memory | all
 │
-├── requirements.txt            # Python dependencies
+├── requirements.txt            # Python dependencies (statsmodels, pmdarima, pandas …)
 │
 ├── sample_cpu_data.csv         # Auto-generated synthetic CPU data (created on first run)
 ├── sample_memory_data.csv      # Auto-generated synthetic memory data (created on first run)
@@ -380,6 +392,8 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 ```
+
+> **Windows note:** All dependencies (`statsmodels`, `pmdarima`, `pandas`, `matplotlib`, `elasticsearch`) ship as pure-Python wheels — no C++ compiler, MinGW, or RTools required.
 
 ### 2. Run both pipelines with synthetic data (no Elasticsearch needed)
 
